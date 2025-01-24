@@ -1,129 +1,117 @@
 import streamlit as st
-import pandas as pd
-import plotly.graph_objs as go
-from datetime import datetime, timedelta
 import requests
-import numpy as np
-from sklearn.linear_model import LinearRegression
-import yfinance as yf
-import os
-from dotenv import load_dotenv
-from alpha_vantage.foreignexchange import ForeignExchange
+import pandas as pd
+import plotly.express as px
+from datetime import datetime
 
-load_dotenv()
-
-# -------- Ρυθμίσεις ----------
+# ========== Ρυθμίσεις Γλώσσας ==========
 LANGUAGES = {
     "en": {
-        "title": "🚀 Advanced Currency Analytics",
+        "title": "💱 Ultimate Currency Converter",
+        "amount": "Amount",
+        "from_curr": "From Currency",
+        "to_curr": "To Currency",
         "convert": "Convert",
-        "historical": "Historical Trends",
-        "alerts": "Rate Alerts",
-        "predict": "Predictions",
-        "api_mode": "Use Alpha Vantage API (Advanced)",
-        "no_api_warning": "Using free ECB/CoinGecko data (limited)"
+        "result": "Converted Amount",
+        "history": "Historical Rates (1 Year)",
+        "error": "Error fetching data. Please try again later.",
+        "switch_lang": "Switch to Greek"
     },
     "el": {
-        "title": "🚀 Προηγμένος Μετρητής & Ανάλυση Νομισμάτων",
+        "title": "💱 Εξαιρετικός Μετατροπέας Συναλλάγματος",
+        "amount": "Ποσό",
+        "from_curr": "Από Νόμισμα",
+        "to_curr": "Σε Νόμισμα",
         "convert": "Μετατροπή",
-        "historical": "Ιστορικά Δεδομένα",
-        "alerts": "Ειδοποιήσεις",
-        "predict": "Προβλέψεις",
-        "api_mode": "Χρήση Alpha Vantage API (Για προχωρημένους)",
-        "no_api_warning": "Χρήση δωρεάν δεδομένων ECB/CoinGecko (περιορισμένα)"
+        "result": "Μετατρεπμένο Ποσό",
+        "history": "Ιστορικές Ισοτιμίες (1 Έτος)",
+        "error": "Σφάλμα φόρτωσης δεδομένων. Δοκιμάστε ξανά αργότερα.",
+        "switch_lang": "Αλλαγή σε Αγγλικά"
     }
 }
 
-# -------- API Functions ----------
-def fetch_rates(use_alpha_vantage=False):
-    """Λήψη δεδομένων ανάλογα με την επιλογή API"""
-    rates = {}
-    
-    # Προσθήκη δεδομένων από ECB
+# ========== Λήψη Δεδομένων ==========
+@st.cache_data(ttl=3600)  # Cache για 1 ώρα
+def fetch_data():
     try:
-        ecb_data = requests.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml").text
+        # FIAT από ECB
+        ecb_response = requests.get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml")
+        ecb_data = ecb_response.text
+        fiat_rates = {"EUR": 1.0}
+        
         for line in ecb_data.split("\n"):
-            if 'currency=' in line and 'rate=' in line:
+            if 'currency="' in line and 'rate="' in line:
                 currency = line.split('currency="')[1].split('"')[0]
                 rate = line.split('rate="')[1].split('"')[0]
-                rates[currency] = float(rate)
-        rates["EUR"] = 1.0
-    except:
-        pass
-    
-    # Προσθήκη δεδομένων από Alpha Vantage (αν επιλεγεί)
-    if use_alpha_vantage and os.getenv("ALPHA_VANTAGE_API_KEY"):
-        try:
-            av = ForeignExchange(key=os.getenv("ALPHA_VANTAGE_API_KEY"))
-            av_rates, _ = av.get_currency_exchange_rate(from_currency="USD", to_currency="EUR")
-            rates["USD"] = float(av_rates["5. Exchange Rate"])
-        except:
-            pass
-    
-    # Προσθήκη κρυπτονομισμάτων από CoinGecko
+                fiat_rates[currency] = float(rate)
+        
+        # Crypto από CoinGecko
+        crypto_response = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,eur")
+        crypto_data = crypto_response.json()
+        crypto_rates = {
+            "BTC": crypto_data["bitcoin"]["eur"],
+            "ETH": crypto_data["ethereum"]["eur"]
+        }
+        
+        return {**fiat_rates, **crypto_rates}, None
+    except Exception as e:
+        return None, str(e)
+
+# ========== Ιστορικά Δεδομένα ==========
+def get_historical_data(base_currency, target_currency):
+    symbol = f"{base_currency}{target_currency}=X" if base_currency != "BTC" and base_currency != "ETH" else f"{target_currency}-{base_currency}"
+    data = pd.DataFrame()
     try:
-        crypto_data = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,eur").json()
-        rates["BTC"] = crypto_data["bitcoin"]["usd"]
-        rates["ETH"] = crypto_data["ethereum"]["usd"]
+        data = yf.download(symbol, period="1y")["Close"].reset_index()
     except:
         pass
-    
-    return rates
+    return data
 
-# -------- Main App ----------
+# ========== Κύρια Εφαρμογή ==========
 def main():
-    st.set_page_config(layout="wide")
-    lang = LANGUAGES["el"] if st.session_state.get("lang", "el") == "el" else LANGUAGES["en"]
-
-    # Sidebar ρυθμίσεις
-    with st.sidebar:
-        st.button("ΕΛ/EN", on_click=lambda: st.session_state.update(lang="en" if st.session_state.get("lang") == "el" else "el"))
-        use_alpha_vantage = st.checkbox(lang["api_mode"])
-        if not use_alpha_vantage:
-            st.warning(lang["no_api_warning"])
-        
-    # Καρτέλες
-    tab1, tab2, tab3, tab4 = st.tabs([lang["convert"], lang["historical"], lang["alerts"], lang["predict"]])
-
-    with tab1:
-        # Μετατροπέας
-        rates = fetch_rates(use_alpha_vantage)
-        if not rates:
-            st.error("Δεν βρέθηκαν δεδομένα!")
-            return
-        
+    # Αρχικοποίηση γλώσσας
+    if "lang" not in st.session_state:
+        st.session_state.lang = "el"
+    
+    # Λήψη δεδομένων
+    rates, error = fetch_data()
+    lang = LANGUAGES[st.session_state.lang]
+    
+    # ===== UI =====
+    st.set_page_config(page_title=lang["title"], layout="centered")
+    st.title(lang["title"])
+    
+    # Κουμπί αλλαγής γλώσσας
+    if st.button(lang["switch_lang"]):
+        st.session_state.lang = "en" if st.session_state.lang == "el" else "el"
+        st.experimental_rerun()
+    
+    # Εμφάνιση σφάλματος αν υπάρχει
+    if error:
+        st.error(f"{lang['error']}: {error}")
+        return
+    
+    # Μετατροπέας
+    with st.container():
         col1, col2 = st.columns(2)
         with col1:
-            amount = st.number_input("Ποσό", min_value=0.0, value=1.0)
-            from_curr = st.selectbox("Από", list(rates.keys()))
+            amount = st.number_input(lang["amount"], min_value=0.0, value=1.0, step=0.1)
+            from_curr = st.selectbox(lang["from_curr"], list(rates.keys()), index=0)
         with col2:
-            to_curr = st.selectbox("Σε", list(rates.keys()))
+            to_curr = st.selectbox(lang["to_curr"], list(rates.keys()), index=1)
         
-        if st.button(lang["convert"]):
+        if st.button(lang["convert"], use_container_width=True):
             converted = (amount / rates[from_curr]) * rates[to_curr]
-            st.success(f"**Αποτέλεσμα:** {converted:.2f} {to_curr}")
-
-    with tab2:
-        # Ιστορικά γραφήματα
-        currency_pair = st.selectbox("Επιλογή νομίσματος", ["EUR/USD", "EUR/GBP", "BTC/USD"])
-        data = yf.download(f"{currency_pair.replace('/', '')}=X", period="1y")
-        fig = go.Figure(data=[go.Candlestick(x=data.index,
-                        open=data['Open'],
-                        high=data['High'],
-                        low=data['Low'],
-                        close=data['Close'])])
+            st.success(f"**{lang['result']}**: {converted:.4f} {to_curr}")
+    
+    # Ιστορικά δεδομένα
+    st.subheader(lang["history"])
+    historical_data = get_historical_data(from_curr, to_curr)
+    if not historical_data.empty:
+        fig = px.line(historical_data, x="Date", y="Close", labels={"Close": f"{from_curr}/{to_curr}"})
         st.plotly_chart(fig, use_container_width=True)
-
-    with tab3:
-        # Ειδοποιήσεις
-        st.info("Αυτή η λειτουργικότητα απαιτεί API Key (ενεργοποιήστε το Alpha Vantage)")
-
-    with tab4:
-        # Προβλέψεις ML
-        days = st.slider("Ημέρες για πρόβλεψη", 1, 30, 7)
-        if st.button("Πρόβλεψη EUR/USD"):
-            prediction = predict_future_rates("EURUSD", days)
-            st.metric("Προβλεπόμενη τιμή", f"{prediction:.2f}")
+    else:
+        st.warning(lang["error"])
 
 if __name__ == "__main__":
     main()
